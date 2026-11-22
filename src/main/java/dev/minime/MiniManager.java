@@ -5,7 +5,6 @@ import net.minecraft.client.Minecraft;
 import net.minecraft.client.multiplayer.ClientLevel;
 import net.minecraft.client.player.LocalPlayer;
 import net.minecraft.client.resources.sounds.SimpleSoundInstance;
-import net.minecraft.core.particles.BlockParticleOption;
 import net.minecraft.core.particles.ParticleOptions;
 import net.minecraft.core.particles.ParticleTypes;
 import net.minecraft.sounds.SoundEvents;
@@ -15,9 +14,11 @@ import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.entity.MoverType;
 import net.minecraft.world.entity.ai.attributes.AttributeInstance;
 import net.minecraft.world.entity.ai.attributes.Attributes;
-import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.phys.Vec3;
 
+import java.util.ArrayList;
+import java.util.Iterator;
+import java.util.List;
 import java.util.Random;
 import java.util.UUID;
 
@@ -48,6 +49,7 @@ public class MiniManager {
         Config cfg = MiniMeClient.config;
         ClientLevel level = mc.level;
         LocalPlayer p = mc.player;
+        if (level != null) tickBursts(level);
         if (level == null || p == null || !cfg.enabled || !cfg.isEntityModel()) { remove(); return; }
         long now = System.currentTimeMillis();
         if (now < respawnAt) return;
@@ -145,7 +147,7 @@ public class MiniManager {
         if (mini == null || mc.level == null) return;
         Config cfg = MiniMeClient.config;
         Vec3 c = mini.position().add(0, 0.5 * baseHeight() * cfg.scale, 0);
-        burst(mc.level, c, 40, cfg.popEffect);
+        burst(mc.level, c, 64, cfg.popEffect);
         mc.getSoundManager().play(SimpleSoundInstance.forUI(SoundEvents.ITEM_PICKUP, 1.4f));
         remove();
         cameFromAway = false;
@@ -162,7 +164,7 @@ public class MiniManager {
         switch (effect) {
             case "snow": return ParticleTypes.SNOWFLAKE;
             case "cherry": return ParticleTypes.CHERRY_LEAVES;
-            case "sand": return new BlockParticleOption(ParticleTypes.BLOCK, Blocks.SAND.defaultBlockState());
+            case "sand": return ParticleTypes.WHITE_ASH;          // лёгкая светлая пыль, не падает кучей
             case "souls": return ParticleTypes.SOUL;
             case "hearts": return ParticleTypes.HEART;
             case "flame": return ParticleTypes.FLAME;
@@ -179,20 +181,65 @@ public class MiniManager {
             case "witch": return ParticleTypes.WITCH;
             case "angry": return ParticleTypes.ANGRY_VILLAGER;
             case "ink": return ParticleTypes.SQUID_INK;
-            case "gold": return new BlockParticleOption(ParticleTypes.BLOCK, Blocks.GOLD_BLOCK.defaultBlockState());
-            case "diamond": return new BlockParticleOption(ParticleTypes.BLOCK, Blocks.DIAMOND_BLOCK.defaultBlockState());
-            case "emerald": return new BlockParticleOption(ParticleTypes.BLOCK, Blocks.EMERALD_BLOCK.defaultBlockState());
+            case "gold": return ParticleTypes.WAX_ON;             // золотые искры
+            case "diamond": return ParticleTypes.SCRAPE;          // бирюзово-белые искры
+            case "emerald": return ParticleTypes.COMPOSTER;       // зелёные искры
             default: return ParticleTypes.POOF;
         }
     }
 
-    /** Только выбранный эффект, без примесей. */
+    private static double speedOf(String fx) {
+        switch (fx) {
+            case "firework": return 0.30;
+            case "sparks": return 0.25;
+            case "stars": return 0.22;
+            case "hearts": return 0.10;
+            case "souls": return 0.15;
+            case "snow": case "cherry": return 0.06;
+            default: return 0.20;
+        }
+    }
+
+    /** Эффекты, которые сами падают: их разбрасываем по сфере, а не из одной точки. */
+    private static boolean heavy(String fx) {
+        return fx.equals("snow") || fx.equals("cherry") || fx.equals("totem");
+    }
+
+    private static class Burst {
+        Vec3 c; String fx; int total; int step = 0; final int steps = 8;
+        Burst(Vec3 c, String fx, int total) { this.c = c; this.fx = fx; this.total = total; }
+    }
+    private static final List<Burst> BURSTS = new ArrayList<>();
+
+    /** Ставит залп в очередь: частицы вылетают во все стороны волнами в течение ~0.4 с. */
     private static void burst(ClientLevel level, Vec3 c, int n, String effect) {
-        ParticleOptions fx = effectOf(effect);
-        for (int i = 0; i < n; i++) {
-            double vx = (RND.nextDouble() - 0.5) * 0.3, vy = (RND.nextDouble() - 0.2) * 0.3, vz = (RND.nextDouble() - 0.5) * 0.3;
-            if ("notes".equals(effect)) { vx = RND.nextDouble(); vy = 0; vz = 0; }   // у нот первая компонента — цвет
-            level.addParticle(fx, c.x, c.y, c.z, vx, vy, vz);
+        BURSTS.add(new Burst(c, effect, n));
+    }
+
+    private static void tickBursts(ClientLevel level) {
+        for (Iterator<Burst> it = BURSTS.iterator(); it.hasNext(); ) {
+            Burst b = it.next();
+            emit(level, b);
+            if (++b.step >= b.steps) it.remove();
+        }
+    }
+
+    private static void emit(ClientLevel level, Burst b) {
+        ParticleOptions fx = effectOf(b.fx);
+        int per = Math.max(1, b.total / b.steps);
+        double speed = speedOf(b.fx);
+        double maxR = heavy(b.fx) ? 0.9 : 0.2;
+        double r = maxR * (b.step + 1) / b.steps;
+        for (int i = 0; i < per; i++) {
+            // равномерное случайное направление по сфере
+            double ux = RND.nextGaussian(), uy = RND.nextGaussian(), uz = RND.nextGaussian();
+            double len = Math.sqrt(ux * ux + uy * uy + uz * uz);
+            if (len < 1e-4) { ux = 0; uy = 1; uz = 0; len = 1; }
+            ux /= len; uy /= len; uz /= len;
+            double rr = r * (0.4 + 0.6 * RND.nextDouble());
+            double vx = ux * speed, vy = uy * speed, vz = uz * speed;
+            if ("notes".equals(b.fx)) { vx = RND.nextDouble(); vy = 0; vz = 0; }   // у нот первая компонента — цвет
+            level.addParticle(fx, b.c.x + ux * rr, b.c.y + uy * rr, b.c.z + uz * rr, vx, vy, vz);
         }
     }
 
